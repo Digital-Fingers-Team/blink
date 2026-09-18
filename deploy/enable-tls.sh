@@ -16,7 +16,7 @@ if [[ ! -f "$CONF/live/$HOST/fullchain.pem" ]]; then
     -v "$ROOT/docker/certbot/www:/var/www/certbot:z" \
     docker.io/certbot/certbot:latest certonly --webroot -w /var/www/certbot \
     -d "$HOST" --non-interactive --agree-tos --no-eff-email --keep-until-expiring \
-    --email "${CERTBOT_EMAIL:?set CERTBOT_EMAIL}"
+    $( [[ -d "$CONF/accounts" ]] && echo "" || echo "--register-unsafely-without-email" )  # reuse the existing ACME account
 fi
 
 cat > "$ROOT/docker/nginx-upstreams/blink.conf" <<EOF
