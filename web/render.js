@@ -92,22 +92,48 @@ export function aperturePhotometry(data, n, scaleArcsec, rAp = 2.5, rIn = 5, rOu
   return { net, bg, area, jy: net * 1e6 * srPerPix, mjy: net * 1e9 * srPerPix };
 }
 
-// Simple peak finder on a difference image: pixels > k*sigma above local background, grouped by 8-connectivity
-export function findPeaks(diff, n, k = 5, minPix = 2, template = null, maxPix = 150) {
-  const { sigma } = robustStats(diff); const thr = k * sigma; const seen = new Uint8Array(n * n); const peaks = [];
-  const tst = template ? robustStats(template) : null; const tthr = tst ? tst.median + 3 * tst.sigma : Infinity;
-  for (let j = 1; j < n - 1; j++) for (let i = 1; i < n - 1; i++) {
-    const idx = j * n + i; if (seen[idx] || !(diff[idx] > thr)) continue;
-    const stack = [idx]; let cnt = 0, sx = 0, sy = 0, sw = 0, mx = -Infinity, mi = idx; seen[idx] = 1;
-    while (stack.length) {
-      const p = stack.pop(); const v = diff[p]; cnt++; const px = p % n, py = (p / n) | 0; sx += px * v; sy += py * v; sw += v; if (v > mx) { mx = v; mi = p; }
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const q = p + dy * n + dx; const qx = px + dx, qy = py + dy; if (qx < 0 || qy < 0 || qx >= n || qy >= n || seen[q] || !(diff[q] > thr)) continue; seen[q] = 1; stack.push(q); }
+// Mover detector on a difference image.
+// Noise model: sigma_i = sqrt(sigma_bg^2 + (alpha * T3_i)^2) where T3 is the 3x3 max of the static-sky
+// template. Residuals of bright stars (imperfect photometric matching, PSF/wavelength differences) scale
+// with the star's brightness, so they are down-weighted automatically; a real mover sits on empty sky.
+export function findPeaks(diff, n, k = 5, minPix = 3, template = null, maxPix = 60, alpha = 0.2) {
+  const { sigma } = robustStats(diff); const seen = new Uint8Array(n * n); const peaks = [];
+  const noise = new Float32Array(n * n).fill(sigma);
+  if (template) {
+    const tst = robustStats(template); const t0 = tst.median;
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+      let m = 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const qx = i + dx, qy = j + dy; if (qx < 0 || qy < 0 || qx >= n || qy >= n) continue; const t = template[qy * n + qx] - t0; if (t > m) m = t; }
+      noise[j * n + i] = Math.sqrt(sigma * sigma + (alpha * m) ** 2);
     }
-    // bright static source underneath (3x3 max of the template): a residual, not a mover
-    let tmax = -Infinity; if (template) { const px = mi % n, py = (mi / n) | 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const qx = px + dx, qy = py + dy; if (qx >= 0 && qy >= 0 && qx < n && qy < n) { const t = template[qy * n + qx]; if (t > tmax) tmax = t; } } }
-    const onStar = template && tmax > tthr && tmax > 0.25 * mx;
-    // very large blobs are background gradients (zodiacal light differs per epoch), not point-like movers
-    if (cnt >= minPix && cnt <= maxPix && !onStar) peaks.push({ x: sx / sw, y: sy / sw, peak: mx, snr: mx / sigma, npix: cnt });
+  }
+  const snrAt = (p) => diff[p] / noise[p];
+  for (let j = 1; j < n - 1; j++) for (let i = 1; i < n - 1; i++) {
+    const idx = j * n + i; if (seen[idx] || !(snrAt(idx) > k)) continue;
+    const stack = [idx]; let cnt = 0, sx = 0, sy = 0, sw = 0, mx = -Infinity, flux = 0; seen[idx] = 1;
+    while (stack.length) {
+      const p = stack.pop(); const v = diff[p], s = snrAt(p); cnt++; const px = p % n, py = (p / n) | 0; sx += px * v; sy += py * v; sw += v; flux += v; if (s > mx) mx = s;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const q = p + dy * n + dx; const qx = px + dx, qy = py + dy; if (qx < 0 || qy < 0 || qx >= n || qy >= n || seen[q] || !(snrAt(q) > k)) continue; seen[q] = 1; stack.push(q); }
+    }
+    if (cnt >= minPix && cnt <= maxPix && sw > 0) peaks.push({ x: sx / sw, y: sy / sw, snr: mx, npix: cnt, flux });
   }
   return peaks.sort((a, b) => b.snr - a.snr).slice(0, 12);
+}
+
+// A residual that recurs at the same place in many frames is a static artefact (bright-star core,
+// bad pixel column), not a mover. Marks p.persistent on every peak; returns the number suppressed.
+// Also marks p.confirmed when a non-persistent peak is seen again within `confirmPx` in another frame
+// of the same visit (|dt| <= visitDays): a real mover drifts a little between exposures minutes apart,
+// whereas a cosmic-ray hit or hot pixel appears in exactly one frame.
+export function flagPersistent(peaksByFrame, minRepeat, mjds = null, radiusPx = 2, confirmPx = 6, visitDays = 1) {
+  let suppressed = 0; const all = peaksByFrame.map((pk, fi) => pk.map(p => ({ p, fi })));
+  const flat = all.flat();
+  for (const { p, fi } of flat) {
+    let rep = 0; for (const o of flat) if (o.fi !== fi && Math.hypot(o.p.x - p.x, o.p.y - p.y) <= radiusPx) rep++;
+    p.repeats = rep; p.persistent = rep >= minRepeat; if (p.persistent) suppressed++;
+  }
+  for (const { p, fi } of flat) {
+    if (p.persistent) { p.confirmed = false; continue; }
+    p.confirmed = flat.some(o => o.fi !== fi && !o.p.persistent && (!mjds || Math.abs(mjds[o.fi] - mjds[fi]) <= visitDays) && Math.hypot(o.p.x - p.x, o.p.y - p.y) <= confirmPx);
+  }
+  return suppressed;
 }

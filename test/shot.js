@@ -29,7 +29,7 @@ const views = (process.env.VIEWS || '#m=3iatlas,#m=vesta,#m=planet9,#m=mira,#ra=
     await page.screenshot({ path: `/work/shot${name}.png` });
     // difference mode screenshot
     await page.click('#modeSeg button[data-mode=diff]').catch(() => {});
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(4000);
     await page.screenshot({ path: `/work/shot${name}_diff.png`, fullPage: true });
     const detText = await page.$eval('#detectList', el => el.innerText.replace(/\n+/g, ' | ').slice(0, 600)).catch(() => '');
     console.log('   detections:', detText);

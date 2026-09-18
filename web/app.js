@@ -1,5 +1,5 @@
 // BLINK — SPHEREx Time Machine (front-end)
-import { robustStats, toImageData, subtractBackground, medianStack, matchedDifference, aperturePhotometry, findPeaks, percentile, finiteSample } from './render.js';
+import { robustStats, toImageData, subtractBackground, medianStack, matchedDifference, aperturePhotometry, findPeaks, flagPersistent, percentile, finiteSample } from './render.js';
 
 const $ = (s) => document.querySelector(s);
 const D2R = Math.PI / 180, R2D = 180 / Math.PI;
@@ -124,6 +124,7 @@ async function loadFrames() {
   computeTemplate(); computeCuts(); render(); drawTimeline(); drawSpectrum();
   status(`${S.frames.length} frames · ${((performance.now() - t0) / 1000).toFixed(1)} s`);
   enableControls(true);
+  computeAllPeaks(token);
   loadKnownBodies(token); loadTrack(token);
   if (S.frames.length > 1 && !S.playing) play();
 }
@@ -159,7 +160,20 @@ function trackAt(mjd) {
 }
 
 // ---------- image pipeline ----------
-function computeTemplate() { S.template = S.frames.length >= 3 ? medianStack(S.frames.map(f => f.bg)) : null; }
+function computeTemplate() { S.template = S.frames.length >= 3 ? medianStack(S.frames.map(f => f.bg)) : null; S.suppressed = 0; }
+function diffFor(f) {
+  let e = S.peaks.get(f); if (e) return e;
+  const m = matchedDifference(f.bg, S.template); e = { diff: m.diff, peaks: findPeaks(m.diff, f.meta.n, 5, 3, S.template), scale: m.scale }; S.peaks.set(f, e); return e;
+}
+// Difference every frame (in idle slices) so residuals can be cross-checked across epochs.
+async function computeAllPeaks(token) {
+  if (!S.template) return;
+  for (let i = 0; i < S.frames.length; i++) { if (token !== S.loadToken) return; diffFor(S.frames[i]); if (i % 8 === 7) await new Promise(r => setTimeout(r, 0)); }
+  const minRepeat = Math.max(2, Math.ceil(0.12 * S.frames.length));
+  S.suppressed = flagPersistent(S.frames.map(f => S.peaks.get(f).peaks), minRepeat, S.frames.map(f => f.meta.mjd));
+  if (S.mode === 'diff') { drawOverlay(); listDetections(); }
+}
+const livePeaks = (f) => (S.peaks.get(f)?.peaks || []).filter(p => !p.persistent);
 function computeCuts() {
   const all = []; for (const f of S.frames) { const s = finiteSample(f.bg, 4000); for (let i = 0; i < s.length; i += 4) all.push(s[i]); }
   all.sort((a, b) => a - b); const st = robustStats(all);
@@ -173,7 +187,7 @@ function frameFilter() { // wavelength-matching subset for blinking
 function currentImage() {
   const f = S.frames[S.idx]; if (!f) return null;
   if (S.mode === 'template' && S.template) return { data: S.template, diverging: false };
-  if (S.mode === 'diff' && S.template) { let d = S.peaks.get(f)?.diff; if (!d) { const m = matchedDifference(f.bg, S.template); d = m.diff; const pk = findPeaks(d, f.meta.n, 5, 3, S.template); S.peaks.set(f, { diff: d, peaks: pk, scale: m.scale }); } return { data: d, diverging: true }; }
+  if (S.mode === 'diff' && S.template) return { data: diffFor(f).diff, diverging: true };
   return { data: f.bg, diverging: false };
 }
 const off = document.createElement('canvas'); const offCtx = off.getContext('2d');
@@ -212,12 +226,12 @@ function drawOverlay() {
   }
   if ($('#ovTrack').checked && S.track) { const p = trackAt(f.meta.mjd); if (p) { const [i, j] = skyToPix(f, p.ra, p.dec); const [x, y] = toXY(i, j); ctx.strokeStyle = '#60c8ff'; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(x, y - 12); ctx.lineTo(x + 12, y); ctx.lineTo(x, y + 12); ctx.lineTo(x - 12, y); ctx.closePath(); ctx.stroke(); ctx.fillStyle = '#60c8ff'; ctx.fillText('predicted', x + 14, y + 12); } }
   const cometLocked = S.mission && MISSIONS[S.mission].lock === 'comet';
-  if ($('#ovPeaks').checked && S.mode === 'diff' && !cometLocked) for (const p of (S.peaks.get(f)?.peaks || [])) {
-    const [x, y] = toXY(p.x, p.y); const known = matchKnown(f, p); ctx.strokeStyle = known ? '#6ee7a8' : '#ff6b6b'; ctx.lineWidth = 1.4; ctx.strokeRect(x - 8, y - 8, 16, 16); ctx.fillStyle = ctx.strokeStyle; ctx.fillText(`${p.snr.toFixed(0)}σ`, x + 11, y + 11);
+  if ($('#ovPeaks').checked && S.mode === 'diff' && !cometLocked) for (const p of livePeaks(f)) {
+    const [x, y] = toXY(p.x, p.y); const known = matchKnown(f, p); ctx.strokeStyle = known ? '#6ee7a8' : p.confirmed ? '#ff6b6b' : 'rgba(255,160,160,.45)'; ctx.lineWidth = 1.4; ctx.strokeRect(x - 8, y - 8, 16, 16); ctx.fillStyle = ctx.strokeStyle; ctx.fillText(`${p.snr.toFixed(0)}σ`, x + 11, y + 11);
   }
 }
 function matchKnown(f, p) { const [ra, dec] = pixToSky(f, p.x, p.y); const near = 2.5 * f.meta.scale / 3600; let best = null;
-  if (S.target && angSep(ra, dec, S.target.ra, S.target.dec) < near) return { name: `${S.target.name || 'target'} — brightness changed vs. static sky`, kind: 'track', d: 0 }; for (const b of (S.known.get(f) || [])) { const d = angSep(ra, dec, b.ra, b.dec); if (d < near && (!best || d < best.d)) best = { ...b, d }; } if (!best && S.track) { const t = trackAt(f.meta.mjd); if (t && angSep(ra, dec, t.ra, t.dec) < near) best = { name: 'ephemeris target', kind: 'track', d: 0 }; } return best; }
+  if (S.target && angSep(ra, dec, S.target.ra, S.target.dec) < 2 * near) return { name: `${S.target.name || 'target'} — brightness changed vs. static sky`, kind: 'track', d: 0 }; for (const b of (S.known.get(f) || [])) { const d = angSep(ra, dec, b.ra, b.dec); if (d < near && (!best || d < best.d)) best = { ...b, d }; } if (!best && S.track) { const t = trackAt(f.meta.mjd); if (t && angSep(ra, dec, t.ra, t.dec) < near) best = { name: 'ephemeris target', kind: 'track', d: 0 }; } return best; }
 
 // ---------- timeline ----------
 function drawTimeline() {
@@ -258,14 +272,16 @@ function drawSpectrum() {
 // ---------- detections ----------
 function listDetections() {
   const f = S.frames[S.idx]; const list = $('#detectList'); list.innerHTML = ''; let n = 0;
-  const add = (kind, title, meta, onClick) => { const d = document.createElement('div'); d.className = 'det'; d.innerHTML = `<span class="kind ${kind}">${kind === 'known' ? 'KNOWN' : kind === 'track' ? 'TARGET' : 'UNIDENTIFIED'}</span><span>${title}</span><span class="meta">${meta}</span>`; if (onClick) d.onclick = onClick; list.appendChild(d); n++; };
+  const LABEL = { known: 'KNOWN', track: 'TARGET', unknown: 'UNIDENTIFIED', single: 'SINGLE FRAME' };
+  const add = (kind, title, meta, onClick) => { const d = document.createElement('div'); d.className = 'det'; d.innerHTML = `<span class="kind ${kind}">${LABEL[kind]}</span><span>${title}</span><span class="meta">${meta}</span>`; if (onClick) d.onclick = onClick; list.appendChild(d); n++; };
   if (f) {
     const cometLocked = S.mission && MISSIONS[S.mission].lock === 'comet';
-    if (S.mode === 'diff' && !cometLocked) for (const p of (S.peaks.get(f)?.peaks || [])) { const k = matchKnown(f, p); const [ra, dec] = pixToSky(f, p.x, p.y); add(k ? (k.kind === 'track' ? 'track' : 'known') : 'unknown', k ? k.name : `mover at ${fmtDeg(ra)}, ${fmtDeg(dec)}`, `${p.snr.toFixed(0)}σ · ${p.npix} px`, () => { S.mode = 'diff'; }); }
+    if (S.mode === 'diff' && !cometLocked) for (const p of [...livePeaks(f)].sort((a, b) => (b.confirmed | 0) - (a.confirmed | 0) || b.snr - a.snr)) { const k = matchKnown(f, p); const [ra, dec] = pixToSky(f, p.x, p.y); const kind = k ? (k.kind === 'track' ? 'track' : 'known') : (p.confirmed ? 'unknown' : 'single'); add(kind, k ? k.name : `${p.confirmed ? 'mover' : 'hit'} at ${fmtDeg(ra)}, ${fmtDeg(dec)}`, `${p.snr.toFixed(0)}σ · ${p.npix} px${!k && !p.confirmed ? ' · seen in one frame only (cosmic ray?)' : !k ? ' · seen again in a neighbouring frame' : ''}`, () => { S.mode = 'diff'; }); }
     for (const b of (S.known.get(f) || [])) { const [i, j] = skyToPix(f, b.ra, b.dec); if (i < 0 || j < 0 || i >= f.meta.n || j >= f.meta.n) continue; add('known', b.name, `${b.kind}${b.vmag ? ' · V ' + b.vmag.toFixed(1) : ''} · in field`); }
     const t = S.track && trackAt(f.meta.mjd); if (t) add('track', `${S.mission ? MISSIONS[S.mission].track : S.target.name} (JPL ephemeris)`, `${fmtDeg(t.ra)}, ${fmtDeg(t.dec)}`);
   }
   if (S.mission && MISSIONS[S.mission].lock === 'comet' && S.mode === 'diff') { const d = document.createElement('div'); d.className = 'hint'; d.textContent = 'Comet-locked view: the frames are centred on the comet, so background stars are the movers here and the comet is the static object at the centre.'; list.prepend(d); }
+  if (S.mode === 'diff' && S.suppressed) { const d = document.createElement('div'); d.className = 'hint'; d.textContent = `${S.suppressed} residual${S.suppressed > 1 ? 's' : ''} that repeat at the same place across epochs were suppressed as static artefacts.`; list.appendChild(d); }
   $('#detectCount').textContent = n; if (!n) list.innerHTML = `<div class="hint">${S.mode === 'diff' ? 'No ≥5σ residuals in this frame.' : 'Switch to Difference mode to auto-detect movers; known asteroids/comets in the field are listed here as they load.'}</div>`;
 }
 
@@ -309,7 +325,7 @@ function buildReport() {
   if (f) {
     lines.push(`Current frame: ${f.meta.obsid} D${f.meta.detector} · ${fmtDate(f.meta.mjd)} · λ ${f.meta.wavelength?.toFixed(3)} µm`);
     lines.push(`  ${f.meta.url}`);
-    const pk = S.peaks.get(f)?.peaks || []; if (pk.length) { lines.push(`  Residuals ≥5σ vs. median template:`); for (const p of pk) { const k = matchKnown(f, p); const [ra, dec] = pixToSky(f, p.x, p.y); lines.push(`   - ${fmtDeg(ra, 5)}, ${fmtDeg(dec, 5)}  ${p.snr.toFixed(1)}σ  ${p.npix}px  ${k ? 'matches ' + k.name : 'NO CATALOGUED MATCH'}`); } }
+    const pk = livePeaks(f); if (pk.length) { lines.push(`  Movers ≥5σ vs. static-sky template (static residuals removed):`); for (const p of pk) { const k = matchKnown(f, p); const [ra, dec] = pixToSky(f, p.x, p.y); lines.push(`   - ${fmtDeg(ra, 5)}, ${fmtDeg(dec, 5)}  ${p.snr.toFixed(1)}σ  ${p.npix}px  ${k ? 'matches ' + k.name : 'NO CATALOGUED MATCH'}`); } }
     const kb = S.known.get(f) || []; if (kb.length) lines.push(`  Known small bodies in field (JPL SBDB): ${kb.map(b => b.name).join('; ')}`);
   }
   lines.push(``, `Photometry at target (aperture 2.5 px, annulus 5–9 px):`);
@@ -318,7 +334,7 @@ function buildReport() {
   return lines.join('\n');
 }
 function downloadJson() {
-  const out = { target: S.target, band: S.band, field: { n: S.n, scale: S.scale }, frames: S.frames.map(f => ({ ...f.meta, phot: f.phot, peaks: (S.peaks.get(f)?.peaks || []).map(p => ({ ...p, sky: pixToSky(f, p.x, p.y) })), known: S.known.get(f) || [] })), track: S.track };
+  const out = { target: S.target, band: S.band, field: { n: S.n, scale: S.scale }, frames: S.frames.map(f => ({ ...f.meta, phot: f.phot, peaks: livePeaks(f).map(p => ({ ...p, sky: pixToSky(f, p.x, p.y) })), known: S.known.get(f) || [] })), track: S.track };
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(out, null, 1)], { type: 'application/json' })); a.download = `blink-${(S.target.name || 'target').replace(/\W+/g, '_')}.json`; a.click();
 }
 

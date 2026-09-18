@@ -90,6 +90,7 @@ input[type=range] { accent-color: var(--accent); }
 .det .kind.known { background: #10351f; color: var(--ok); }
 .det .kind.unknown { background: #3a1010; color: var(--danger); }
 .det .kind.track { background: #102a3a; color: var(--accent2); }
+.det .kind.single { background: #2a2230; color: #c9a0a0; }
 .det .meta { color: var(--muted); }
 #spectrum { width: 100%; display: block; }
 .hint { color: var(--muted); font-size: 11px; padding: 6px 0 10px; }
