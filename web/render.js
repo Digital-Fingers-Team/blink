@@ -93,7 +93,7 @@ export function aperturePhotometry(data, n, scaleArcsec, rAp = 2.5, rIn = 5, rOu
 }
 
 // Simple peak finder on a difference image: pixels > k*sigma above local background, grouped by 8-connectivity
-export function findPeaks(diff, n, k = 5, minPix = 2, template = null) {
+export function findPeaks(diff, n, k = 5, minPix = 2, template = null, maxPix = 150) {
   const { sigma } = robustStats(diff); const thr = k * sigma; const seen = new Uint8Array(n * n); const peaks = [];
   const tst = template ? robustStats(template) : null; const tthr = tst ? tst.median + 3 * tst.sigma : Infinity;
   for (let j = 1; j < n - 1; j++) for (let i = 1; i < n - 1; i++) {
@@ -106,7 +106,8 @@ export function findPeaks(diff, n, k = 5, minPix = 2, template = null) {
     // bright static source underneath (3x3 max of the template): a residual, not a mover
     let tmax = -Infinity; if (template) { const px = mi % n, py = (mi / n) | 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const qx = px + dx, qy = py + dy; if (qx >= 0 && qy >= 0 && qx < n && qy < n) { const t = template[qy * n + qx]; if (t > tmax) tmax = t; } } }
     const onStar = template && tmax > tthr && tmax > 0.25 * mx;
-    if (cnt >= minPix && !onStar) peaks.push({ x: sx / sw, y: sy / sw, peak: mx, snr: mx / sigma, npix: cnt });
+    // very large blobs are background gradients (zodiacal light differs per epoch), not point-like movers
+    if (cnt >= minPix && cnt <= maxPix && !onStar) peaks.push({ x: sx / sw, y: sy / sw, peak: mx, snr: mx / sigma, npix: cnt });
   }
   return peaks.sort((a, b) => b.snr - a.snr).slice(0, 12);
 }
