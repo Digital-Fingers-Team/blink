@@ -1,0 +1,17 @@
+{
+  "name": "blink-server",
+  "version": "0.1.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "type": "module",
+  "dependencies": {
+    "@fastify/static": "^7.0.4",
+    "fastify": "^4.29.1"
+  }
+}

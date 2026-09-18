@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BLINK — SPHEREx Time Machine</title>
+<meta name="description" content="Blink NASA SPHEREx's all-sky infrared images across time. Spot comets, asteroids and unknown movers — the way Pluto was found, rebuilt for a billion objects in 102 colours.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='14' fill='%230b1020'/><circle cx='11' cy='16' r='3' fill='%23ffb547'/><circle cx='21' cy='16' r='3' fill='%2360c8ff'/></svg>">
+<link rel="stylesheet" href="https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="./" title="BLINK home">
+    <span class="logo"><i></i><i></i></span>
+    <span class="name">BLINK</span>
+    <span class="tag">SPHEREx Time Machine</span>
+  </a>
+  <form class="search" id="searchForm" autocomplete="off">
+    <input id="searchInput" type="search" placeholder="Object name, or RA Dec in degrees (e.g. Vesta · M31 · 156.09 -41.65)" aria-label="Search target">
+    <button type="submit">Go</button>
+  </form>
+  <nav class="missions" aria-label="Missions">
+    <button data-mission="3iatlas" title="Interstellar comet 3I/ATLAS, Aug & Dec 2025">☄️ 3I/ATLAS</button>
+    <button data-mission="planet9" title="Predicted 2025 position of the IRAS/AKARI Planet Nine candidate">🪐 Planet 9 zone</button>
+    <button data-mission="vesta" title="Bright asteroid 4 Vesta moving through the field">🪨 Asteroid</button>
+    <button data-mission="mira" title="Mira, the prototype pulsating variable star">⭐ Mira</button>
+    <button data-mission="nep" title="SPHEREx deep field at the North Ecliptic Pole">🔭 Deep field</button>
+  </nav>
+  <div class="top-right">
+    <button id="shareBtn" class="ghost" title="Copy a link to this view">Share</button>
+    <button id="aboutBtn" class="ghost">About</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="sky" id="skyPane">
+    <div id="aladin"></div>
+    <div class="sky-hud">
+      <div class="hud-row"><span class="dot"></span><span id="hudSurvey">SPHEREx QR2 · all-sky · 0.75–5 µm</span></div>
+      <div class="hud-row small">Click anywhere on the sky to open the Time Machine there. Scroll to zoom.</div>
+    </div>
+    <div class="sky-layers">
+      <label>Sky map <select id="surveySel">
+        <option value="CDS/P/SPHEREx/QR2/color">SPHEREx colour (102 bands)</option>
+        <option value="CDS/P/SPHEREx/QR2/D1">SPHEREx D1 · 0.75–1.1 µm</option>
+        <option value="CDS/P/SPHEREx/QR2/D2">SPHEREx D2 · 1.1–1.6 µm</option>
+        <option value="CDS/P/SPHEREx/QR2/D3">SPHEREx D3 · 1.6–2.4 µm</option>
+        <option value="CDS/P/SPHEREx/QR2/D4">SPHEREx D4 · 2.4–3.8 µm</option>
+        <option value="CDS/P/SPHEREx/QR2/D5">SPHEREx D5 · 3.8–4.4 µm</option>
+        <option value="CDS/P/SPHEREx/QR2/D6">SPHEREx D6 · 4.4–5.0 µm</option>
+        <option value="CDS/P/DSS2/color">DSS2 optical (for comparison)</option>
+        <option value="CDS/P/unWISE/color-W2-W1W2-W1">unWISE infrared (for comparison)</option>
+      </select></label>
+    </div>
+  </section>
+
+  <aside class="tm" id="tmPane">
+    <div class="tm-head">
+      <div>
+        <div class="tm-title" id="tmTitle">Time Machine</div>
+        <div class="tm-sub" id="tmSub">Pick a mission or click the sky.</div>
+      </div>
+      <div class="tm-status" id="tmStatus"></div>
+    </div>
+
+    <div class="viewer" id="viewer">
+      <canvas id="frameCanvas" width="512" height="512"></canvas>
+      <canvas id="overlayCanvas" width="512" height="512"></canvas>
+      <div class="frame-hud">
+        <div class="hud-l"><span id="hudDate">—</span><span id="hudBand" class="band-chip">—</span><span id="hudWave">—</span></div>
+        <div class="hud-r"><span id="hudIdx">0 / 0</span></div>
+      </div>
+      <div class="viewer-empty" id="viewerEmpty">
+        <div class="ve-title">Nothing loaded yet</div>
+        <div class="ve-text">SPHEREx re-images every point of the sky roughly every six months. Choose a target and this panel will line up every exposure of that spot and blink them, the way Clyde Tombaugh found Pluto in 1930.</div>
+      </div>
+      <div class="progress" id="progress"><div id="progressBar"></div></div>
+    </div>
+
+    <div class="controls">
+      <div class="ctl-row">
+        <button id="playBtn" class="primary" disabled>▶ Blink</button>
+        <button id="prevBtn" disabled>‹</button>
+        <button id="nextBtn" disabled>›</button>
+        <label class="inline">Speed <input id="speed" type="range" min="1" max="12" value="4"></label>
+      </div>
+      <div class="ctl-row">
+        <div class="seg" id="modeSeg" role="tablist">
+          <button data-mode="blink" class="on">Blink</button>
+          <button data-mode="diff">Difference</button>
+          <button data-mode="template">Static sky</button>
+        </div>
+        <div class="seg" id="bandSeg" title="Detector band (each band is a different wavelength range)"></div>
+      </div>
+      <div class="ctl-row">
+        <label class="inline">Stretch <select id="stretchSel"><option value="asinh">asinh</option><option value="linear">linear</option><option value="log">log</option></select></label>
+        <label class="inline">Colour <select id="cmapSel"><option value="gray">grey</option><option value="ember">ember</option><option value="ice">ice</option></select></label>
+        <label class="inline">Field <select id="sizeSel"><option value="96,6.15">10′ native</option><option value="128,6.15" selected>13′ native</option><option value="160,9">24′</option><option value="200,12">40′</option><option value="240,18">72′</option></select></label>
+      </div>
+      <div class="ctl-row">
+        <label class="chk"><input id="ovKnown" type="checkbox" checked> Known asteroids &amp; comets (JPL)</label>
+        <label class="chk"><input id="ovTrack" type="checkbox" checked> Ephemeris track</label>
+        <label class="chk"><input id="ovPeaks" type="checkbox" checked> Auto-detect movers</label>
+        <label class="chk"><input id="ovGrid" type="checkbox"> Crosshair</label>
+      </div>
+      <div class="ctl-row">
+        <label class="inline grow">Match wavelength ±<span id="waveTolVal">all</span> µm <input id="waveTol" type="range" min="0" max="20" value="20" title="Only blink frames whose wavelength at the target is within this tolerance of the current frame"></label>
+      </div>
+    </div>
+
+    <div class="timeline-wrap">
+      <canvas id="timeline" height="64"></canvas>
+    </div>
+
+    <details class="panel" id="detectPanel" open>
+      <summary>Detections <span class="count" id="detectCount">0</span></summary>
+      <div id="detectList" class="list"></div>
+    </details>
+
+    <details class="panel" id="specPanel" open>
+      <summary>Spectrum at target (aperture photometry across all frames)</summary>
+      <canvas id="spectrum" height="180"></canvas>
+      <div class="hint">Each SPHEREx exposure sees the target through a slightly different wavelength — stacking all epochs yields a 0.75–5 µm spectrum. Points are coloured by band; hover the timeline to highlight a frame.</div>
+    </details>
+
+    <details class="panel" id="infoPanel">
+      <summary>Frame details</summary>
+      <pre id="frameInfo" class="mono"></pre>
+    </details>
+
+    <div class="report-row">
+      <button id="reportBtn" disabled>Copy discovery report</button>
+      <button id="jsonBtn" disabled>Download data (JSON)</button>
+      <a id="irsaLink" class="ghost" target="_blank" rel="noopener" hidden>Open exposure at IRSA ↗</a>
+    </div>
+  </aside>
+</main>
+
+<dialog id="aboutDlg">
+  <article>
+    <h2>BLINK — SPHEREx Time Machine</h2>
+    <p>NASA's SPHEREx maps the whole sky every six months in 102 near-infrared bands. Anything that moves or changes between visits — comets, asteroids, brown dwarfs, variable stars, maybe an undiscovered planet — reveals itself when you compare images taken months apart. In 1930 Clyde Tombaugh found Pluto by flicking between two photographic plates in a <em>blink comparator</em>. BLINK rebuilds that machine for a billion objects.</p>
+    <h3>How it works</h3>
+    <ul>
+      <li><b>Sky map</b>: CDS HiPS mosaics of SPHEREx Quick Release 2, streamed as tiles (Aladin Lite).</li>
+      <li><b>Time Machine</b>: every SPHEREx exposure covering your point is found through IRSA's SIA2 service; the pixels are read straight out of NASA's open-data S3 bucket with HTTP range requests (no 71 MB downloads), reprojected north-up onto a common grid, and blinked.</li>
+      <li><b>Difference</b>: each frame minus the per-pixel median of all frames. Static stars cancel; anything that moved shows up bright. Peaks above 5σ are listed as detections.</li>
+      <li><b>Known objects</b>: JPL's Small-Body Identification API lists every catalogued asteroid and comet in the field at the moment of each exposure. A mover with no label is either an artefact — or something new.</li>
+      <li><b>Spectrum</b>: SPHEREx's linear-variable filters mean each exposure sees the target at a different wavelength; aperture photometry across all frames yields a 0.75–5 µm spectrum.</li>
+    </ul>
+    <h3>Data &amp; credits</h3>
+    <p>SPHEREx data: NASA/JPL-Caltech, processed by IPAC; served by the NASA/IPAC Infrared Science Archive (IRSA) and the AWS Open Data Program. HiPS mosaics: CDS, Strasbourg. Ephemerides: NASA/JPL SSD. Name resolution: CDS Sesame. Built for the 2026 NASA Space Apps Challenge — <i>Planet X and SPHEREx</i>.</p>
+    <form method="dialog"><button class="primary">Close</button></form>
+  </article>
+</dialog>
+
+<footer class="foot">
+  <span>Data: NASA/JPL-Caltech · IPAC/IRSA · CDS · JPL SSD</span>
+  <span id="footStat"></span>
+</footer>
+
+<script src="https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.js" charset="utf-8"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
