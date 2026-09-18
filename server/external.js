@@ -10,16 +10,20 @@ function sexToDeg(s, hours) { const p = s.trim().replace(/[:'"]/g, ' ').split(/\
 // via NASA/JPL's Small-Body Identification API. Half-width in degrees (JPL treats hwidth as degrees).
 export async function smallBodies(ra, dec, mjd, halfDeg = 0.15, vmagLim = 22) {
   const d = mjdToDate(mjd); const t = d.toISOString().slice(0, 19).replace('T', '_');
-  const out = [];
+  const out = []; let partial = false;
   for (const kind of ['a', 'c']) {
     const q = new URLSearchParams({
       'sb-kind': kind, 'mag-required': 'true', 'two-pass': 'true', 'suppress-first-pass': 'true', 'req-elem': 'false',
       'vmag-lim': String(vmagLim), 'fov-ra-center': fmtRa(ra), 'fov-dec-center': fmtDec(dec),
       'fov-ra-hwidth': String(halfDeg), 'fov-dec-hwidth': String(halfDeg), 'obs-time': t, 'mpc-code': '500',
     });
-    const r = await fetch('https://ssd-api.jpl.nasa.gov/sb_ident.api?' + q, { headers: { 'User-Agent': 'BLINK-SPHEREx/0.1' } });
-    if (!r.ok) throw new Error(`sb_ident HTTP ${r.status}`);
-    const j = await r.json();
+    // JPL throttles bursts with 503s: retry with backoff, then degrade to an empty list for this kind
+    let j = null;
+    for (let attempt = 0; attempt < 4 && !j; attempt++) {
+      const r = await fetch('https://ssd-api.jpl.nasa.gov/sb_ident.api?' + q, { headers: { 'User-Agent': 'BLINK-SPHEREx/0.1' } });
+      if (r.ok) j = await r.json(); else if (r.status === 503 || r.status === 429) await new Promise(res => setTimeout(res, 700 * (attempt + 1))); else throw new Error(`sb_ident HTTP ${r.status}`);
+    }
+    if (!j) { partial = true; continue; }
     const fields = j.fields_second || []; const rows = j.data_second_pass || [];
     const iN = fields.findIndex(f => /Object name/i.test(f)), iR = fields.findIndex(f => /RA/.test(f) && /hh/.test(f)), iD = fields.findIndex(f => /Dec/.test(f) && /dd/.test(f));
     const iV = fields.findIndex(f => /Visual magnitude/i.test(f)), iRa = fields.findIndex(f => /RA rate/i.test(f)), iDr = fields.findIndex(f => /Dec rate/i.test(f));
@@ -28,7 +32,7 @@ export async function smallBodies(ra, dec, mjd, halfDeg = 0.15, vmagLim = 22) {
       vmag: iV >= 0 ? +row[iV] : null, raRate: iRa >= 0 ? +row[iRa] : null, decRate: iDr >= 0 ? +row[iDr] : null,
     });
   }
-  return { ra, dec, mjd, halfDeg, count: out.length, bodies: out };
+  return { ra, dec, mjd, halfDeg, count: out.length, partial, bodies: out };
 }
 
 // JPL Horizons ephemeris for a named body (e.g. "3I", "Ceres", "2025 N1") between two MJDs.

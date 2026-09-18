@@ -13,6 +13,7 @@ async function run(m) {
   let exposures;
   if (m.file) { const j = JSON.parse(await readFile(new URL(m.file, import.meta.url), 'utf8')); exposures = j.exposures.map(e => ({ ...e, ra: m.lock === 'comet' ? e.cometRa : j.ra, dec: m.lock === 'comet' ? e.cometDec : j.dec })); }
   else { const r = await fetch(`${BASE}/api/epochs?ra=${m.ra}&dec=${m.dec}${m.collection ? '&collection=' + m.collection : ''}`); const j = await r.json(); exposures = j.epochs.map(e => ({ ...e, ra: m.ra, dec: m.dec })); console.log(m.id, 'epochs', j.count); }
+  // note: for fixed targets every cutout is centred on the mission target (ra/dec overwritten above)
   for (const band of m.bands) {
     let list = exposures.filter(e => e.band === band && e.key);
     if (list.length > MAX) { const step = list.length / MAX; list = Array.from({ length: MAX }, (_, i) => list[Math.floor(i * step)]); }

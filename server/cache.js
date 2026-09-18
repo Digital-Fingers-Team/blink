@@ -20,6 +20,7 @@ export async function cached(ns, key, ttlSec, produce, { binary = false } = {}) 
     }
   } catch {}
   const val = await produce();
+  if (val && val.partial) return val; // transient upstream failure: do not cache
   try {
     await mkdir(path.dirname(p), { recursive: true });
     await writeFile(p, binary ? val : JSON.stringify(val));

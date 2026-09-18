@@ -47,7 +47,7 @@ export function toImageData(data, n, { lo, hi, mode = 'asinh', cmap = 'gray', di
   for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
     const v = data[j * n + i]; const o = ((n - 1 - j) * n + i) * 4; // flip: row 0 (south) drawn at bottom
     if (!Number.isFinite(v)) { const c = ((i >> 3) + (j >> 3)) & 1 ? 26 : 20; px[o] = c; px[o + 1] = c; px[o + 2] = c + 6; px[o + 3] = 255; continue; }
-    let t = diverging ? 0.5 + 0.5 * Math.max(-1, Math.min(1, (v - lo) / (hi - lo))) : Math.max(0, Math.min(1, f(v)));
+    let t = diverging ? 0.5 + 0.5 * Math.max(-1, Math.min(1, (v - 0.5 * (lo + hi)) / (0.5 * (hi - lo) || 1))) : Math.max(0, Math.min(1, f(v)));
     const k = Math.round(t * 255) * 3; px[o] = L[k]; px[o + 1] = L[k + 1]; px[o + 2] = L[k + 2]; px[o + 3] = 255;
   }
   return img;
@@ -68,6 +68,17 @@ export function medianStack(frames) {
 
 export function difference(a, b) { const out = new Float32Array(a.length); for (let i = 0; i < a.length; i++) out[i] = a[i] - b[i]; return out; }
 
+// frame - k*template, with k the robust median ratio over bright template pixels. Because SPHEREx sees
+// each spot at a different wavelength on every exposure, star fluxes differ frame to frame; a single
+// scale factor removes most of that before we look for movers.
+export function matchedDifference(frame, template) {
+  const st = robustStats(template); const thr = st.median + 8 * st.sigma; const ratios = [];
+  for (let i = 0; i < frame.length; i += 1) { const t = template[i], v = frame[i]; if (t > thr && Number.isFinite(v) && v > 0) ratios.push(v / t); }
+  ratios.sort((x, y) => x - y); const k = ratios.length >= 10 ? ratios[ratios.length >> 1] : 1;
+  const out = new Float32Array(frame.length); for (let i = 0; i < frame.length; i++) out[i] = frame[i] - k * template[i];
+  return { diff: out, scale: k, nRef: ratios.length };
+}
+
 // Aperture photometry at the frame centre: sum(r<=rAp) - median(annulus) * area. Returns MJy/sr summed and Jy.
 export function aperturePhotometry(data, n, scaleArcsec, rAp = 2.5, rIn = 5, rOut = 9) {
   const c = (n - 1) / 2; let sum = 0, area = 0; const ann = [];
@@ -82,8 +93,9 @@ export function aperturePhotometry(data, n, scaleArcsec, rAp = 2.5, rIn = 5, rOu
 }
 
 // Simple peak finder on a difference image: pixels > k*sigma above local background, grouped by 8-connectivity
-export function findPeaks(diff, n, k = 5, minPix = 2) {
+export function findPeaks(diff, n, k = 5, minPix = 2, template = null) {
   const { sigma } = robustStats(diff); const thr = k * sigma; const seen = new Uint8Array(n * n); const peaks = [];
+  const tst = template ? robustStats(template) : null; const tthr = tst ? tst.median + 3 * tst.sigma : Infinity;
   for (let j = 1; j < n - 1; j++) for (let i = 1; i < n - 1; i++) {
     const idx = j * n + i; if (seen[idx] || !(diff[idx] > thr)) continue;
     const stack = [idx]; let cnt = 0, sx = 0, sy = 0, sw = 0, mx = -Infinity, mi = idx; seen[idx] = 1;
@@ -91,7 +103,10 @@ export function findPeaks(diff, n, k = 5, minPix = 2) {
       const p = stack.pop(); const v = diff[p]; cnt++; const px = p % n, py = (p / n) | 0; sx += px * v; sy += py * v; sw += v; if (v > mx) { mx = v; mi = p; }
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const q = p + dy * n + dx; const qx = px + dx, qy = py + dy; if (qx < 0 || qy < 0 || qx >= n || qy >= n || seen[q] || !(diff[q] > thr)) continue; seen[q] = 1; stack.push(q); }
     }
-    if (cnt >= minPix) peaks.push({ x: sx / sw, y: sy / sw, peak: mx, snr: mx / sigma, npix: cnt });
+    // bright static source underneath (3x3 max of the template): a residual, not a mover
+    let tmax = -Infinity; if (template) { const px = mi % n, py = (mi / n) | 0; for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const qx = px + dx, qy = py + dy; if (qx >= 0 && qy >= 0 && qx < n && qy < n) { const t = template[qy * n + qx]; if (t > tmax) tmax = t; } } }
+    const onStar = template && tmax > tthr && tmax > 0.25 * mx;
+    if (cnt >= minPix && !onStar) peaks.push({ x: sx / sw, y: sy / sw, peak: mx, snr: mx / sigma, npix: cnt });
   }
   return peaks.sort((a, b) => b.snr - a.snr).slice(0, 12);
 }

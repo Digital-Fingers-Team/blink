@@ -1,5 +1,5 @@
 // BLINK — SPHEREx Time Machine (front-end)
-import { robustStats, toImageData, subtractBackground, medianStack, difference, aperturePhotometry, findPeaks, percentile, finiteSample } from './render.js';
+import { robustStats, toImageData, subtractBackground, medianStack, matchedDifference, aperturePhotometry, findPeaks, percentile, finiteSample } from './render.js';
 
 const $ = (s) => document.querySelector(s);
 const D2R = Math.PI / 180, R2D = 180 / Math.PI;
@@ -51,7 +51,7 @@ function initSky() {
     const aladin = A.aladin('#aladin', { survey: 'CDS/P/SPHEREx/QR2/color', fov: 4, target: '156.09 -41.65', cooFrame: 'ICRSd', showReticle: true, showCooGrid: false, showSimbadPointerControl: false, showFullscreenControl: true, showLayersControl: false, showGotoControl: false, showShareControl: false, showFrame: false, showProjectionControl: false, showSettingsControl: false, showCooGridControl: false, showZoomControl: true, showContextMenu: false, realFullscreen: false });
     S.aladin = aladin;
     S.marker = A.catalog({ name: 'Target', sourceSize: 22, color: '#ffb547', shape: 'cross' }); aladin.addCatalog(S.marker);
-    S.fpOverlay = A.graphicOverlay({ color: 'rgba(96,200,255,.35)', lineWidth: 1 }); aladin.addOverlay(S.fpOverlay);
+    S.fpOverlay = A.graphicOverlay({ color: 'rgba(96,200,255,.6)', lineWidth: 1.5 }); aladin.addOverlay(S.fpOverlay);
     aladin.on('click', (o) => { if (!o || o.isDragging || !Number.isFinite(o.ra)) return; setTarget({ ra: o.ra, dec: o.dec, name: null }); });
     $('#surveySel').addEventListener('change', (e) => aladin.setBaseImageLayer(e.target.value));
     const h = parseHash(); if (h) applyHash(h); else runMission('3iatlas');
@@ -61,14 +61,11 @@ function syncSky(ra, dec, fov) {
   if (!S.aladin) return; S.aladin.gotoRaDec(ra, dec); if (fov) S.aladin.setFoV(fov);
   S.marker.removeAll(); S.marker.addSources([A.source(ra, dec, { name: S.target?.name || 'target' })]);
 }
-function showFootprints(epochs) {
-  if (!S.fpOverlay) return; S.fpOverlay.removeAll();
-  const seen = new Set();
-  for (const e of epochs.slice(0, 120)) {
-    if (!e.region || seen.has(e.obsid + e.band)) continue; seen.add(e.obsid + e.band);
-    const m = /POLYGON ICRS ([\d\.\-\s]+)/.exec(e.region); if (!m) continue; const v = m[1].trim().split(/\s+/).map(Number); const pts = [];
-    for (let i = 0; i + 1 < v.length; i += 2) pts.push([v[i], v[i + 1]]); S.fpOverlay.add(A.polygon(pts));
-  }
+function showFootprint(frame) { // outline of the exposure currently displayed
+  if (!S.fpOverlay) return; S.fpOverlay.removeAll(); if (!frame || !S.epochs) return;
+  const e = S.epochs.epochs.find(x => x.obsid === frame.meta.obsid && x.band === frame.meta.band); if (!e || !e.region) return;
+  const m = /POLYGON ICRS ([\d\.\-\s]+)/.exec(e.region); if (!m) return; const v = m[1].trim().split(/\s+/).map(Number); const pts = [];
+  for (let i = 0; i + 1 < v.length; i += 2) pts.push([v[i], v[i + 1]]); S.fpOverlay.add(A.polygon(pts));
 }
 
 // ---------- target & epochs ----------
@@ -84,7 +81,7 @@ async function setTarget(t, opts = {}) {
   writeHash();
   try {
     if (opts.exposures) { S.epochs = { epochs: opts.exposures, count: opts.exposures.length }; }
-    else { const r = await api('api/epochs', { ra: t.ra, dec: t.dec, collection: opts.collection }); S.epochs = await r.json(); showFootprints(S.epochs.epochs); }
+    else { const r = await api('api/epochs', { ra: t.ra, dec: t.dec, collection: opts.collection }); S.epochs = await r.json(); }
   } catch (e) { status('IRSA search failed: ' + e.message, true); return; }
   if (!S.epochs.count) { status('No SPHEREx exposures cover this position yet (or IRSA is busy).', true); $('#viewerEmpty').hidden = false; return; }
   buildBandSeg(S.epochs.epochs, opts.band);
@@ -110,7 +107,7 @@ async function loadFrames() {
   let done = 0; const t0 = performance.now();
   await mapLimit(list, 6, async (e) => {
     if (token !== S.loadToken) return;
-    const ra = e.ra ?? S.target.ra, dec = e.dec ?? S.target.dec; // comet-locked missions carry per-frame centres
+    const ra = e.cra ?? S.target.ra, dec = e.cdec ?? S.target.dec; // comet-locked missions carry per-frame centres (cra/cdec)
     const c = await fetchCutout(e.key, ra, dec, S.n, S.scale);
     if (token !== S.loadToken) return;
     if (c.meta.coverage < 0.15) { done++; return; }
@@ -176,7 +173,7 @@ function frameFilter() { // wavelength-matching subset for blinking
 function currentImage() {
   const f = S.frames[S.idx]; if (!f) return null;
   if (S.mode === 'template' && S.template) return { data: S.template, diverging: false };
-  if (S.mode === 'diff' && S.template) { let d = S.peaks.get(f)?.diff; if (!d) { d = difference(f.bg, S.template); const pk = findPeaks(d, f.meta.n, 5, 2); S.peaks.set(f, { diff: d, peaks: pk }); } return { data: d, diverging: true }; }
+  if (S.mode === 'diff' && S.template) { let d = S.peaks.get(f)?.diff; if (!d) { const m = matchedDifference(f.bg, S.template); d = m.diff; const pk = findPeaks(d, f.meta.n, 5, 3, S.template); S.peaks.set(f, { diff: d, peaks: pk, scale: m.scale }); } return { data: d, diverging: true }; }
   return { data: f.bg, diverging: false };
 }
 const off = document.createElement('canvas'); const offCtx = off.getContext('2d');
@@ -188,7 +185,7 @@ function render() {
   if (img.diverging) { const st = robustStats(img.data); lo = -6 * st.sigma; hi = 6 * st.sigma; }
   offCtx.putImageData(toImageData(img.data, n, { lo, hi, mode: S.stretch, cmap: img.diverging ? 'diverging' : S.cmap, diverging: img.diverging }), 0, 0);
   ctx.imageSmoothingEnabled = false; ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(off, 0, 0, cv.width, cv.height);
-  drawOverlay(); updateHud();
+  drawOverlay(); updateHud(); if (f !== S.lastFp) { S.lastFp = f; showFootprint(f); }
 }
 function updateHud() {
   const f = S.frames[S.idx];
@@ -214,11 +211,13 @@ function drawOverlay() {
     ctx.strokeStyle = '#6ee7a8'; ctx.fillStyle = '#6ee7a8'; ctx.beginPath(); ctx.arc(x, y, 9, 0, Math.PI * 2); ctx.stroke(); ctx.fillText(`${b.name.replace(/\s*\(.*\)$/, '')}${b.vmag ? ' V' + b.vmag.toFixed(1) : ''}`, x + 12, y - 10);
   }
   if ($('#ovTrack').checked && S.track) { const p = trackAt(f.meta.mjd); if (p) { const [i, j] = skyToPix(f, p.ra, p.dec); const [x, y] = toXY(i, j); ctx.strokeStyle = '#60c8ff'; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(x, y - 12); ctx.lineTo(x + 12, y); ctx.lineTo(x, y + 12); ctx.lineTo(x - 12, y); ctx.closePath(); ctx.stroke(); ctx.fillStyle = '#60c8ff'; ctx.fillText('predicted', x + 14, y + 12); } }
-  if ($('#ovPeaks').checked && S.mode === 'diff') for (const p of (S.peaks.get(f)?.peaks || [])) {
+  const cometLocked = S.mission && MISSIONS[S.mission].lock === 'comet';
+  if ($('#ovPeaks').checked && S.mode === 'diff' && !cometLocked) for (const p of (S.peaks.get(f)?.peaks || [])) {
     const [x, y] = toXY(p.x, p.y); const known = matchKnown(f, p); ctx.strokeStyle = known ? '#6ee7a8' : '#ff6b6b'; ctx.lineWidth = 1.4; ctx.strokeRect(x - 8, y - 8, 16, 16); ctx.fillStyle = ctx.strokeStyle; ctx.fillText(`${p.snr.toFixed(0)}σ`, x + 11, y + 11);
   }
 }
-function matchKnown(f, p) { const [ra, dec] = pixToSky(f, p.x, p.y); const near = 2.5 * f.meta.scale / 3600; let best = null; for (const b of (S.known.get(f) || [])) { const d = angSep(ra, dec, b.ra, b.dec); if (d < near && (!best || d < best.d)) best = { ...b, d }; } if (!best && S.track) { const t = trackAt(f.meta.mjd); if (t && angSep(ra, dec, t.ra, t.dec) < near) best = { name: 'ephemeris target', kind: 'track', d: 0 }; } return best; }
+function matchKnown(f, p) { const [ra, dec] = pixToSky(f, p.x, p.y); const near = 2.5 * f.meta.scale / 3600; let best = null;
+  if (S.target && angSep(ra, dec, S.target.ra, S.target.dec) < near) return { name: `${S.target.name || 'target'} — brightness changed vs. static sky`, kind: 'track', d: 0 }; for (const b of (S.known.get(f) || [])) { const d = angSep(ra, dec, b.ra, b.dec); if (d < near && (!best || d < best.d)) best = { ...b, d }; } if (!best && S.track) { const t = trackAt(f.meta.mjd); if (t && angSep(ra, dec, t.ra, t.dec) < near) best = { name: 'ephemeris target', kind: 'track', d: 0 }; } return best; }
 
 // ---------- timeline ----------
 function drawTimeline() {
@@ -226,8 +225,8 @@ function drawTimeline() {
   const w = W / devicePixelRatio, h = 64; ctx.clearRect(0, 0, w, h); const fr = S.frames; if (!fr.length) { ctx.fillStyle = '#4b5578'; ctx.font = '12px system-ui'; ctx.fillText('timeline', 8, 36); return; }
   // compressed time axis: visits (gaps > 5 d) are separated by a fixed gutter
   const pos = timelinePositions(w); const sel = new Set(frameFilter());
-  let lastVisit = -1; ctx.font = '10px system-ui'; ctx.textBaseline = 'top';
-  fr.forEach((f, i) => { if (pos.visit[i] !== lastVisit) { lastVisit = pos.visit[i]; ctx.fillStyle = '#7d89b0'; ctx.fillText(mjdToDate(f.meta.mjd).toISOString().slice(0, 10), pos.x[i] - 2, 4); } });
+  let lastVisit = -1, lastLabelX = -Infinity; ctx.font = '10px system-ui'; ctx.textBaseline = 'top';
+  fr.forEach((f, i) => { if (pos.visit[i] !== lastVisit) { lastVisit = pos.visit[i]; if (pos.x[i] - lastLabelX < 66) return; lastLabelX = pos.x[i]; ctx.fillStyle = '#7d89b0'; ctx.fillText(mjdToDate(f.meta.mjd).toISOString().slice(0, 10), Math.min(pos.x[i] - 2, w - 62), 4); } });
   fr.forEach((f, i) => { const x = pos.x[i]; ctx.fillStyle = sel.has(i) ? BAND_COLOR[f.meta.band] : 'rgba(120,130,170,.35)'; ctx.fillRect(x - 1.5, 22, 3, 24); });
   ctx.fillStyle = '#ffb547'; ctx.fillRect(pos.x[S.idx] - 2.5, 18, 5, 32);
   if (S.hoverIdx >= 0 && fr[S.hoverIdx]) { ctx.fillStyle = '#e8ecf8'; ctx.fillText(fmtDate(fr[S.hoverIdx].meta.mjd), Math.min(w - 120, pos.x[S.hoverIdx]), 52); }
@@ -261,10 +260,12 @@ function listDetections() {
   const f = S.frames[S.idx]; const list = $('#detectList'); list.innerHTML = ''; let n = 0;
   const add = (kind, title, meta, onClick) => { const d = document.createElement('div'); d.className = 'det'; d.innerHTML = `<span class="kind ${kind}">${kind === 'known' ? 'KNOWN' : kind === 'track' ? 'TARGET' : 'UNIDENTIFIED'}</span><span>${title}</span><span class="meta">${meta}</span>`; if (onClick) d.onclick = onClick; list.appendChild(d); n++; };
   if (f) {
-    if (S.mode === 'diff') for (const p of (S.peaks.get(f)?.peaks || [])) { const k = matchKnown(f, p); const [ra, dec] = pixToSky(f, p.x, p.y); add(k ? (k.kind === 'track' ? 'track' : 'known') : 'unknown', k ? k.name : `mover at ${fmtDeg(ra)}, ${fmtDeg(dec)}`, `${p.snr.toFixed(0)}σ · ${p.npix} px`, () => { S.mode = 'diff'; }); }
+    const cometLocked = S.mission && MISSIONS[S.mission].lock === 'comet';
+    if (S.mode === 'diff' && !cometLocked) for (const p of (S.peaks.get(f)?.peaks || [])) { const k = matchKnown(f, p); const [ra, dec] = pixToSky(f, p.x, p.y); add(k ? (k.kind === 'track' ? 'track' : 'known') : 'unknown', k ? k.name : `mover at ${fmtDeg(ra)}, ${fmtDeg(dec)}`, `${p.snr.toFixed(0)}σ · ${p.npix} px`, () => { S.mode = 'diff'; }); }
     for (const b of (S.known.get(f) || [])) { const [i, j] = skyToPix(f, b.ra, b.dec); if (i < 0 || j < 0 || i >= f.meta.n || j >= f.meta.n) continue; add('known', b.name, `${b.kind}${b.vmag ? ' · V ' + b.vmag.toFixed(1) : ''} · in field`); }
     const t = S.track && trackAt(f.meta.mjd); if (t) add('track', `${S.mission ? MISSIONS[S.mission].track : S.target.name} (JPL ephemeris)`, `${fmtDeg(t.ra)}, ${fmtDeg(t.dec)}`);
   }
+  if (S.mission && MISSIONS[S.mission].lock === 'comet' && S.mode === 'diff') { const d = document.createElement('div'); d.className = 'hint'; d.textContent = 'Comet-locked view: the frames are centred on the comet, so background stars are the movers here and the comet is the static object at the centre.'; list.prepend(d); }
   $('#detectCount').textContent = n; if (!n) list.innerHTML = `<div class="hint">${S.mode === 'diff' ? 'No ≥5σ residuals in this frame.' : 'Switch to Difference mode to auto-detect movers; known asteroids/comets in the field are listed here as they load.'}</div>`;
 }
 
@@ -280,8 +281,8 @@ async function runMission(id) {
   const m = MISSIONS[id]; if (!m) return; S.n = m.n || 128; S.scale = m.scale || 6.15; $('#sizeSel').value = `${S.n},${S.scale}`;
   if (m.file) {
     status('Loading mission…'); let j; try { j = await (await fetch(m.file)).json(); } catch (e) { status('Mission data missing: ' + e.message, true); return; }
-    const exposures = j.exposures.map(e => ({ ...e, ra: m.lock === 'comet' ? e.cometRa : (j.ra ?? undefined), dec: m.lock === 'comet' ? e.cometDec : (j.dec ?? undefined) }));
-    const first = exposures[Math.floor(exposures.length / 2)]; const ra = j.ra ?? first.ra, dec = j.dec ?? first.dec;
+    const exposures = j.exposures.map(e => ({ ...e, cra: m.lock === 'comet' ? e.cometRa : undefined, cdec: m.lock === 'comet' ? e.cometDec : undefined }));
+    const first = exposures[Math.floor(exposures.length / 2)]; const ra = j.ra ?? first.cra, dec = j.dec ?? first.cdec;
     const p = setTarget({ ra, dec, name: m.title, moving: !!m.track }, { mission: id, title: m.title, sub: m.sub, exposures, band: m.band || j.band, fov: 3 });
     if (j.track) S.track = j.track;
     return p;
@@ -338,6 +339,7 @@ function wire() {
   $('#shareBtn').onclick = async () => { writeHash(); try { await navigator.clipboard.writeText(location.href); toast('Link copied'); } catch { toast(location.href, 5000); } };
   $('#aboutBtn').onclick = () => $('#aboutDlg').showModal();
   window.addEventListener('resize', () => { drawTimeline(); drawSpectrum(); });
+  window.addEventListener('hashchange', () => { const h = parseHash(); if (h && (h.mission ? h.mission !== S.mission : !S.target || Math.abs(h.ra - S.target.ra) > 1e-4 || Math.abs(h.dec - S.target.dec) > 1e-4)) applyHash(h); });
   window.addEventListener('keydown', (e) => { if (e.target.tagName === 'INPUT') return; if (e.key === ' ') { e.preventDefault(); S.playing ? stop() : play(); } if (e.key === 'ArrowLeft') { stop(); step(-1); } if (e.key === 'ArrowRight') { stop(); step(1); } if (e.key === 'd') $('#modeSeg button[data-mode=diff]').click(); if (e.key === 'b') $('#modeSeg button[data-mode=blink]').click(); });
   $('#footStat').textContent = 'SPHEREx QR2 · updated weekly by IRSA';
 }
