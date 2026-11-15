@@ -143,3 +143,7 @@ dialog li { margin: 4px 0; }
 
 /* Aladin Lite v3 chrome we do not use */
 .aladin-location, .aladin-stack-control, .aladin-menu-control, .aladin-status-bar, .aladin-simbadPointer-control, .aladin-settings-control, .aladin-frameChoice { display: none !important; }
+
+/* Keep the Time Machine full-width while the upstream sky-map service is unavailable. */
+.layout { grid-template-columns: minmax(0, 1fr); }
+#skyPane { display: none; }
