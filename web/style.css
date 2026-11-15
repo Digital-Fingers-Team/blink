@@ -147,3 +147,10 @@ dialog li { margin: 4px 0; }
 /* Keep the Time Machine full-width while the upstream sky-map service is unavailable. */
 .layout { grid-template-columns: minmax(0, 1fr); }
 #skyPane { display: none; }
+
+/* Keep the sky map available without letting an empty survey dominate the page. */
+.layout { flex: 0 0 300px; grid-template-columns: minmax(0, 1fr) 460px; }
+#skyPane { display: block; min-height: 0; }
+@media (max-width: 980px) {
+  .layout { flex: 0 0 auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: 150px auto; }
+}
